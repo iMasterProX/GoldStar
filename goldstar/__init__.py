@@ -1,0 +1,1 @@
+﻿"""goldstar package."""
