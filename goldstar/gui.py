@@ -1,862 +1,871 @@
-﻿import json
+﻿from __future__ import annotations
+
+import json
 import re
 import shutil
+import uuid
 from pathlib import Path
+from typing import Dict, Optional
+
 import tkinter as tk
-import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
 try:
     from PIL import Image, ImageTk
     PIL_AVAILABLE = True
 except Exception:
-    Image = None
-    ImageTk = None
     PIL_AVAILABLE = False
 
 from .config import EXPECTED_PACKS
 from .pack_ops import check_missing_packs, create_missing_packs, expected_pack_names
 from .paths import default_root, normalize_root
-from .scanner import scan_packs
 
-MAX_NAME_LEN = 20
+DEFAULT_NAMESPACE = "blf"
+BEHAVIOR_PACK_NAME = "BLF_CustomTest"
+ARMOR_SAMPLES = [
+    ("test_armor_helmet", "slot.armor.head", "default_helmet"),
+    ("test_armor_chestplate", "slot.armor.chest", "default_chest"),
+    ("test_armor_leggings", "slot.armor.legs", "default_leggings"),
+    ("test_armor_boots", "slot.armor.feet", "default_boots"),
+]
 
+LANGUAGE_LABELS = {
+    "ko": "한국어",
+    "en": "English",
+}
+
+TEXT = {
+    "ko": {
+        "app_title": "GoldStar",
+        "select_pack_title": "작업할 리소스팩을 선택하세요",
+        "root_path_label": "리소스팩 경로",
+        "browse_button": "찾기",
+        "language_label": "언어",
+        "missing_packs": "누락된 팩: {names}",
+        "all_packs_present": "모든 BLF_ 팩이 확인되었습니다.",
+        "missing_all_title": "리소스팩 생성",
+        "missing_all_message": "BLF_ 리소스팩이 하나도 없습니다. 메타데이터 기반 최소 리소스팩을 생성할까요?",
+        "create_failed": "생성 실패: {error}",
+        "missing_pack_warning": "이 팩이 없습니다: {name}",
+        "not_supported": "아직 지원하지 않습니다.",
+        "hint_double_click": "더블클릭으로 선택",
+        "custom_entity_title": "CustomEntity - 새 엔티티 생성",
+        "field_entity_name": "엔티티 이름",
+        "field_namespace": "아이덴티파이어 prefix",
+        "namespace_hint": "비우면 blf",
+        "field_model": "모델링 파일",
+        "field_texture": "텍스처 파일",
+        "field_anim_controller": "애니메이션 컨트롤러(선택)",
+        "field_animation": "애니메이션(선택)",
+        "field_icon": "아이콘 텍스처(선택)",
+        "behavior_pack_checkbox": "테스트용 행동팩도 생성하겠습니까?",
+        "back_button": "뒤로",
+        "create_button": "생성",
+        "select_button": "선택",
+        "required_hint": "필수: 이름/모델링/텍스처",
+        "invalid_name": "엔티티 이름은 영문 소문자/숫자/언더바만, 최대 20자입니다.",
+        "invalid_prefix": "prefix는 영문 소문자만 가능합니다.",
+        "missing_required": "필수 항목이 비었습니다: {fields}",
+        "duplicate_name": "이미 쓰고 있는 이름입니다.",
+        "file_not_found": "파일을 찾을 수 없습니다: {path}",
+        "create_success": "생성 완료: {name}",
+        "error_title": "오류",
+        "warning_title": "경고",
+        "info_title": "안내",
+        "invalid_root": "리소스팩 경로가 없습니다: {path}",
+    },
+    "en": {
+        "app_title": "GoldStar",
+        "select_pack_title": "Select a resource pack to work on",
+        "root_path_label": "Resource pack path",
+        "browse_button": "Browse",
+        "language_label": "Language",
+        "missing_packs": "Missing packs: {names}",
+        "all_packs_present": "All BLF_ packs detected.",
+        "missing_all_title": "Create packs",
+        "missing_all_message": "No BLF_ resource packs found. Create minimal metadata-based packs?",
+        "create_failed": "Create failed: {error}",
+        "missing_pack_warning": "Pack not found: {name}",
+        "not_supported": "Not supported yet.",
+        "hint_double_click": "Double-click to select",
+        "custom_entity_title": "CustomEntity - New Entity",
+        "field_entity_name": "Entity name",
+        "field_namespace": "Identifier prefix",
+        "namespace_hint": "Default is blf",
+        "field_model": "Model file",
+        "field_texture": "Texture file",
+        "field_anim_controller": "Animation controller (optional)",
+        "field_animation": "Animation (optional)",
+        "field_icon": "Icon texture (optional)",
+        "behavior_pack_checkbox": "Also create test behavior pack?",
+        "back_button": "Back",
+        "create_button": "Create",
+        "select_button": "Select",
+        "required_hint": "Required: name/model/texture",
+        "invalid_name": "Entity name must be lowercase letters/numbers/underscore, max 20 chars.",
+        "invalid_prefix": "Prefix must be lowercase letters only.",
+        "missing_required": "Required fields missing: {fields}",
+        "duplicate_name": "Name already in use.",
+        "file_not_found": "File not found: {path}",
+        "create_success": "Created: {name}",
+        "error_title": "Error",
+        "warning_title": "Warning",
+        "info_title": "Info",
+        "invalid_root": "Resource pack path not found: {path}",
+    },
+}
+
+PACK_DESCS: Dict[str, Dict[str, str]] = {}
+for pack in EXPECTED_PACKS:
+    if isinstance(pack, dict):
+        name = pack.get("name")
+        desc = pack.get("desc")
+        if isinstance(name, str) and isinstance(desc, dict):
+            PACK_DESCS[name] = desc
 
 class ListboxTooltip:
-    def __init__(self, listbox: tk.Listbox, descriptions: dict[str, str]) -> None:
+    def __init__(self, listbox: tk.Listbox, text_func) -> None:
         self.listbox = listbox
-        self.descriptions = descriptions
-        self.tip = None
-        self.last_index = None
-        self.listbox.bind("<Motion>", self._on_motion)
-        self.listbox.bind("<Leave>", self._on_leave)
+        self.text_func = text_func
+        self.tip: Optional[tk.Toplevel] = None
+        self.current_index: Optional[int] = None
+        listbox.bind("<Motion>", self._on_motion)
+        listbox.bind("<Leave>", self._hide)
 
-    def _on_motion(self, event: tk.Event) -> None:
-        index = self.listbox.nearest(event.y)
-        if index < 0:
-            return
-        name = self.listbox.get(index)
-        description = self.descriptions.get(name)
-        if not description:
+    def _on_motion(self, event) -> None:
+        if self.listbox.size() == 0:
             self._hide()
             return
-        if self.last_index == index and self.tip is not None:
+        index = self.listbox.nearest(event.y)
+        if index == self.current_index:
             return
-        self._show(event, description)
-        self.last_index = index
+        self.current_index = index
+        try:
+            name = self.listbox.get(index)
+        except tk.TclError:
+            self._hide()
+            return
+        text = self.text_func(name)
+        if not text:
+            self._hide()
+            return
+        self._show(text, event.x_root + 12, event.y_root + 12)
 
-    def _on_leave(self, _event: tk.Event) -> None:
-        self._hide()
-
-    def _show(self, event: tk.Event, text: str) -> None:
+    def _show(self, text: str, x: int, y: int) -> None:
         self._hide()
         self.tip = tk.Toplevel(self.listbox)
         self.tip.wm_overrideredirect(True)
-        x = event.x_root + 12
-        y = event.y_root + 12
         self.tip.wm_geometry(f"+{x}+{y}")
         label = tk.Label(
             self.tip,
             text=text,
-            justify="left",
-            background="#fff9c4",
+            background="#ffffe0",
             relief="solid",
             borderwidth=1,
-            padx=8,
-            pady=6,
+            justify="left",
+            padx=6,
+            pady=3,
         )
         label.pack()
 
-    def _hide(self) -> None:
+    def _hide(self, event=None) -> None:
         if self.tip is not None:
             self.tip.destroy()
             self.tip = None
-            self.last_index = None
+        self.current_index = None
 
-
-class MainWindow:
-    def __init__(self) -> None:
-        self.root = tk.Tk()
-        self.root.title("GoldStar")
-        self.root.minsize(860, 600)
-
+class GoldStarApp:
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        self.language_var = tk.StringVar(value="ko")
+        self.language_label_var = tk.StringVar(value=LANGUAGE_LABELS["ko"])
         self.root_path_var = tk.StringVar(value=str(default_root()))
-        self.status_var = tk.StringVar(value="")
-
-        self.splash_frame = None
-        self.progress = None
-        self.loading_value = 0
-
-        self.current_frame = None
-        self.pack_list = None
-        self.log_text = None
-        self.select_button = None
-
-        self.entity_name_var = None
-        self.namespace_var = None
-        self.anim_controller_var = None
-        self.animation_var = None
-        self.model_var = None
-        self.texture_var = None
-        self.icon_var = None
-        self.entity_log_text = None
-
-        self.logo_source = None
-        self.logo_image = None
-        self.logo_icon = None
-
-        self.title_font = self._make_font(28, "bold")
-        self.header_font = self._make_font(14, "bold")
-
-        self._load_logo_assets()
-        self._build_splash()
-        self._start_loading()
-
-    def _make_font(self, size: int, weight: str) -> tkfont.Font:
-        base = tkfont.nametofont("TkDefaultFont")
-        custom = base.copy()
-        custom.configure(size=size, weight=weight)
-        return custom
-
-    def _build_splash(self) -> None:
-        self.splash_frame = tk.Frame(self.root, bg="white")
-        self.splash_frame.pack(fill="both", expand=True)
-
-        if self.logo_image is not None:
-            title = tk.Label(self.splash_frame, image=self.logo_image, bg="white")
-        else:
-            title = tk.Label(
-                self.splash_frame,
-                text="GoldStar",
-                font=self.title_font,
-                bg="white",
-                fg="#222222",
-            )
-        title.pack(expand=True)
-
-        self.progress = ttk.Progressbar(
-            self.splash_frame,
-            orient="horizontal",
-            mode="determinate",
-            length=320,
-            maximum=100,
-        )
-        self.progress.pack(pady=(0, 80))
-
-    def _start_loading(self) -> None:
-        self.loading_value = 0
-        self._step_loading()
-
-    def _step_loading(self) -> None:
-        self.loading_value += 10
-        if self.progress is not None:
-            self.progress["value"] = self.loading_value
-        if self.loading_value >= 100:
-            self._show_selector()
-        else:
-            self.root.after(80, self._step_loading)
-
-    def _load_logo_assets(self) -> None:
-        logo_path = self._resolve_logo_path()
-        if logo_path is None:
-            return
-
-        if PIL_AVAILABLE:
-            try:
-                image = Image.open(logo_path)
-                self.logo_image = self._scale_pil(image, 260)
-                self.logo_icon = self._scale_pil(image, 32)
-                if self.logo_icon is not None:
-                    self.root.iconphoto(True, self.logo_icon)
-                return
-            except Exception:
-                pass
-
-        try:
-            self.logo_source = tk.PhotoImage(file=str(logo_path))
-        except tk.TclError:
-            return
-
-        self.logo_image = self._scale_logo(self.logo_source, 260)
-        self.logo_icon = self._scale_logo(self.logo_source, 32)
-        if self.logo_icon is not None:
-            self.root.iconphoto(True, self.logo_icon)
-
-    def _resolve_logo_path(self) -> Path | None:
-        candidates = [
-            Path(__file__).resolve().parent.parent / "logo.png",
-            Path(__file__).resolve().parent / "logo.png",
-            Path.cwd() / "logo.png",
-        ]
-        for path in candidates:
-            if path.is_file():
-                return path
-        return None
-
-    def _scale_pil(self, image, target_size: int):
-        if ImageTk is None:
-            return None
-        width, height = image.size
-        max_dim = max(width, height)
-        if max_dim <= target_size:
-            resized = image.copy()
-        else:
-            scale = target_size / max_dim
-            new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
-            resized = image.resize(new_size, Image.LANCZOS)
-        return ImageTk.PhotoImage(resized)
-
-    def _scale_logo(self, image: tk.PhotoImage, target_size: int) -> tk.PhotoImage:
-        width = image.width()
-        height = image.height()
-        max_dim = max(width, height)
-        if max_dim <= target_size:
-            return image
-        scale = target_size / max_dim
-        new_w = max(1, int(width * scale))
-        new_h = max(1, int(height * scale))
-        new_image = tk.PhotoImage(width=new_w, height=new_h)
-        step_x = width / new_w
-        step_y = height / new_h
-
-        for y in range(new_h):
-            y0 = int(y * step_y)
-            y1 = int((y + 1) * step_y)
-            if y1 <= y0:
-                y1 = y0 + 1
-            row = []
-            for x in range(new_w):
-                x0 = int(x * step_x)
-                x1 = int((x + 1) * step_x)
-                if x1 <= x0:
-                    x1 = x0 + 1
-                r_sum = g_sum = b_sum = 0
-                count = 0
-                for sy in range(y0, y1):
-                    for sx in range(x0, x1):
-                        r, g, b = self._parse_color(image.get(sx, sy))
-                        r_sum += r
-                        g_sum += g
-                        b_sum += b
-                        count += 1
-                if count == 0:
-                    row.append("#000000")
-                else:
-                    row.append(
-                        f"#{r_sum // count:02x}{g_sum // count:02x}{b_sum // count:02x}"
-                    )
-            new_image.put("{" + " ".join(row) + "}", to=(0, y))
-        return new_image
-
-    def _parse_color(self, value):
-        if isinstance(value, tuple) and len(value) >= 3:
-            return int(value[0]), int(value[1]), int(value[2])
-        if isinstance(value, str):
-            if value.startswith("#") and len(value) == 7:
-                return (
-                    int(value[1:3], 16),
-                    int(value[3:5], 16),
-                    int(value[5:7], 16),
-                )
-            parts = value.split()
-            if len(parts) >= 3:
-                return int(parts[0]), int(parts[1]), int(parts[2])
-        return 0, 0, 0
-
-    def _switch_view(self, frame: ttk.Frame) -> None:
-        if self.current_frame is not None:
-            self.current_frame.destroy()
-        self.current_frame = frame
-        self.current_frame.pack(fill="both", expand=True)
-
-    def _show_selector(self) -> None:
-        if self.splash_frame is not None:
-            self.splash_frame.destroy()
-        self._switch_view(self._build_selector())
-        self._scan_required_packs()
-
-    def _build_selector(self) -> ttk.Frame:
-        wrapper = ttk.Frame(self.root, padding=12)
-
-        ttk.Label(
-            wrapper,
-            text="작업할 리소스팩을 선택하세요",
-            font=self.header_font,
-        ).pack(anchor="w", pady=(0, 8))
-
-        info = (
-            "이 프로그램을 사용하려면 아래 경로에 BLF_ 리소스팩 11개가 모두 있어야 합니다."
-        )
-        ttk.Label(wrapper, text=info, foreground="#444444").pack(anchor="w")
-
-        path_frame = ttk.Frame(wrapper)
-        path_frame.pack(fill="x", pady=10)
-
-        ttk.Label(path_frame, text="리소스팩 경로").pack(side="left")
-        entry = ttk.Entry(path_frame, textvariable=self.root_path_var, width=80)
-        entry.pack(side="left", padx=6, fill="x", expand=True)
-        ttk.Button(path_frame, text="찾기", command=self._browse).pack(side="left")
-        ttk.Button(path_frame, text="검사", command=self._scan_required_packs).pack(
-            side="left", padx=6
-        )
-
-        list_frame = ttk.Frame(wrapper)
-        list_frame.pack(fill="both", expand=True)
-
-        self.pack_list = tk.Listbox(list_frame, height=11)
-        self.pack_list.pack(side="left", fill="both", expand=True)
-        list_scroll = ttk.Scrollbar(
-            list_frame, orient="vertical", command=self.pack_list.yview
-        )
-        list_scroll.pack(side="right", fill="y")
-        self.pack_list.config(yscrollcommand=list_scroll.set)
-        self.pack_list.bind("<Double-Button-1>", self._on_pack_double_click)
-
-        descriptions = {name: desc for name, desc in EXPECTED_PACKS}
-        ListboxTooltip(self.pack_list, descriptions)
-
-        action_frame = ttk.Frame(wrapper)
-        action_frame.pack(fill="x", pady=(8, 4))
-
-        self.select_button = ttk.Button(
-            action_frame, text="선택", command=self._select_pack
-        )
-        self.select_button.pack(side="right")
-        ttk.Label(action_frame, textvariable=self.status_var).pack(side="left")
-
-        log_frame = ttk.Frame(wrapper)
-        log_frame.pack(fill="both", expand=True, pady=(8, 0))
-
-        ttk.Label(log_frame, text="로그").pack(anchor="w")
-        self.log_text = tk.Text(log_frame, height=8, wrap="word")
-        self.log_text.pack(side="left", fill="both", expand=True)
-        log_scroll = ttk.Scrollbar(
-            log_frame, orient="vertical", command=self.log_text.yview
-        )
-        log_scroll.pack(side="right", fill="y")
-        self.log_text.config(yscrollcommand=log_scroll.set)
-        self.log_text.configure(state="disabled")
-
-        self._populate_pack_list()
-        return wrapper
-
-    def _build_entity_creator(self) -> ttk.Frame:
-        wrapper = ttk.Frame(self.root, padding=12)
-
-        header_frame = ttk.Frame(wrapper)
-        header_frame.pack(fill="x")
-
-        ttk.Label(
-            header_frame,
-            text="CustomEntity - 새 엔티티 생성",
-            font=self.header_font,
-        ).pack(side="left")
-        ttk.Button(header_frame, text="뒤로", command=self._show_selector).pack(
-            side="right"
-        )
-
-        note = (
-            "이름/모델/텍스처는 필수입니다. "
-            "애니메이션 컨트롤러/애니메이션/아이콘은 선택 사항입니다."
-        )
-        ttk.Label(wrapper, text=note, foreground="#444444").pack(anchor="w", pady=6)
-
-        form = ttk.Frame(wrapper)
-        form.pack(fill="x", pady=(8, 4))
-        form.columnconfigure(1, weight=1)
 
         self.entity_name_var = tk.StringVar()
-        self.namespace_var = tk.StringVar(value="blf")
-        self.anim_controller_var = tk.StringVar()
-        self.animation_var = tk.StringVar()
-        self.model_var = tk.StringVar()
-        self.texture_var = tk.StringVar()
-        self.icon_var = tk.StringVar()
+        self.namespace_var = tk.StringVar(value=DEFAULT_NAMESPACE)
+        self.model_path_var = tk.StringVar()
+        self.texture_path_var = tk.StringVar()
+        self.anim_controller_path_var = tk.StringVar()
+        self.animation_path_var = tk.StringVar()
+        self.icon_path_var = tk.StringVar()
+        self.behavior_pack_var = tk.BooleanVar(value=False)
 
-        namespace_label = "아이덴티피어 prefix"
-        ttk.Label(form, text=namespace_label).grid(row=0, column=0, sticky="w", pady=4)
-        namespace_entry = ttk.Entry(
-            form,
-            textvariable=self.namespace_var,
-            validate="key",
-            validatecommand=(self.root.register(self._validate_namespace), "%P"),
+        self.base_dir = Path(__file__).resolve().parents[1]
+        self.logo_path = self.base_dir / "logo.png"
+        self.logo_image: Optional[tk.PhotoImage] = None
+        self.logo_icon: Optional[tk.PhotoImage] = None
+
+        self._asked_missing_for = set()
+        self.current_frame: Optional[tk.Widget] = None
+        self.current_view = "splash"
+
+        self._load_logos()
+        self.root.title(self._t("app_title"))
+        if self.logo_icon:
+            self.root.iconphoto(False, self.logo_icon)
+
+        self._show_splash()
+
+    def _t(self, key: str, **kwargs) -> str:
+        lang = self.language_var.get()
+        text = TEXT.get(lang, {}).get(key, TEXT.get("en", {}).get(key, key))
+        if kwargs:
+            return text.format(**kwargs)
+        return text
+
+    def _clear_frame(self) -> None:
+        if self.current_frame is not None:
+            self.current_frame.destroy()
+            self.current_frame = None
+
+    def _load_logos(self) -> None:
+        self.logo_image = self._load_logo_image(260)
+        self.logo_icon = self._load_logo_image(32)
+
+    def _load_logo_image(self, max_size: int) -> Optional[tk.PhotoImage]:
+        if not self.logo_path.is_file():
+            return None
+        if PIL_AVAILABLE:
+            image = Image.open(self.logo_path).convert("RGBA")
+            image.thumbnail((max_size, max_size), Image.LANCZOS)
+            return ImageTk.PhotoImage(image)
+        base = tk.PhotoImage(file=str(self.logo_path))
+        return self._downscale_photoimage(base, max_size)
+
+    def _downscale_photoimage(self, image: tk.PhotoImage, max_size: int) -> tk.PhotoImage:
+        width = image.width()
+        height = image.height()
+        scale = max(width / max_size, height / max_size, 1)
+        new_width = max(1, int(round(width / scale)))
+        new_height = max(1, int(round(height / scale)))
+        if new_width == width and new_height == height:
+            return image
+        result = tk.PhotoImage(width=new_width, height=new_height)
+        step_x = width / new_width
+        step_y = height / new_height
+        for y in range(new_height):
+            y0 = int(y * step_y)
+            y1 = max(y0 + 1, int((y + 1) * step_y))
+            for x in range(new_width):
+                x0 = int(x * step_x)
+                x1 = max(x0 + 1, int((x + 1) * step_x))
+                color = self._sample_box_color(image, x0, y0, x1, y1)
+                result.put(color, (x, y))
+        return result
+
+    def _sample_box_color(self, image: tk.PhotoImage, x0: int, y0: int, x1: int, y1: int) -> str:
+        max_x = image.width() - 1
+        max_y = image.height() - 1
+        sample_points = [
+            (x0, y0),
+            (x1 - 1, y0),
+            (x0, y1 - 1),
+            (x1 - 1, y1 - 1),
+            ((x0 + x1) // 2, (y0 + y1) // 2),
+        ]
+        r_total = 0
+        g_total = 0
+        b_total = 0
+        count = 0
+        for sx, sy in sample_points:
+            sx = min(max(sx, 0), max_x)
+            sy = min(max(sy, 0), max_y)
+            color = image.get(sx, sy)
+            r, g, b = self._color_to_rgb(color)
+            r_total += r
+            g_total += g
+            b_total += b
+            count += 1
+        r = max(0, min(255, r_total // count))
+        g = max(0, min(255, g_total // count))
+        b = max(0, min(255, b_total // count))
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _color_to_rgb(self, color) -> tuple:
+        if isinstance(color, tuple) and len(color) >= 3:
+            return color[0], color[1], color[2]
+        if isinstance(color, str):
+            if color.startswith("#") and len(color) == 7:
+                return int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+            if color.startswith("#") and len(color) == 13:
+                return (
+                    int(color[1:5], 16) // 257,
+                    int(color[5:9], 16) // 257,
+                    int(color[9:13], 16) // 257,
+                )
+        return 0, 0, 0
+
+    def _show_splash(self) -> None:
+        self._clear_frame()
+        self.current_view = "splash"
+        self.root.configure(background="white")
+        frame = tk.Frame(self.root, bg="white")
+        frame.pack(fill="both", expand=True)
+        self.current_frame = frame
+
+        if self.logo_image:
+            logo_label = tk.Label(frame, image=self.logo_image, bg="white")
+            logo_label.pack(expand=True)
+        else:
+            logo_label = tk.Label(frame, text=self._t("app_title"), bg="white")
+            logo_label.pack(expand=True)
+
+        self.progress = ttk.Progressbar(frame, mode="determinate", maximum=100)
+        self.progress.pack(pady=12, padx=80, fill="x")
+        self._progress_value = 0
+        self.root.after(50, self._tick_progress)
+
+    def _tick_progress(self) -> None:
+        self._progress_value += 8
+        self.progress["value"] = self._progress_value
+        if self._progress_value >= 100:
+            self.root.after(150, self._show_selector)
+        else:
+            self.root.after(40, self._tick_progress)
+
+    def _show_selector(self) -> None:
+        self._clear_frame()
+        self.current_view = "selector"
+        frame = ttk.Frame(self.root, padding=12)
+        frame.pack(fill="both", expand=True)
+        self.current_frame = frame
+        frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(2, weight=1)
+
+        title = ttk.Label(frame, text=self._t("select_pack_title"), font=("TkDefaultFont", 14, "bold"))
+        title.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        lang_label = ttk.Label(frame, text=self._t("language_label"))
+        lang_label.grid(row=0, column=2, sticky="e", padx=(12, 4))
+        lang_combo = ttk.Combobox(
+            frame,
+            textvariable=self.language_label_var,
+            values=list(LANGUAGE_LABELS.values()),
+            state="readonly",
+            width=10,
         )
-        namespace_entry.grid(row=0, column=1, sticky="ew", padx=6, pady=4)
-        ttk.Label(
-            form,
-            text="비우면 기본값 blf",
-            foreground="#666666",
-        ).grid(row=0, column=2, sticky="w", padx=6)
+        lang_combo.grid(row=0, column=3, sticky="e")
+        lang_combo.bind("<<ComboboxSelected>>", self._on_language_change)
 
-        name_label = "엔티티 이름 *"
-        ttk.Label(form, text=name_label).grid(row=1, column=0, sticky="w", pady=4)
-        name_entry = ttk.Entry(
-            form,
-            textvariable=self.entity_name_var,
-            validate="key",
-            validatecommand=(self.root.register(self._validate_entity_name), "%P"),
+        path_label = ttk.Label(frame, text=self._t("root_path_label"))
+        path_label.grid(row=1, column=0, sticky="w")
+        path_entry = ttk.Entry(frame, textvariable=self.root_path_var)
+        path_entry.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(8, 8))
+        browse_button = ttk.Button(frame, text=self._t("browse_button"), command=self._browse_root)
+        browse_button.grid(row=1, column=3, sticky="e")
+
+        list_frame = ttk.Frame(frame)
+        list_frame.grid(row=2, column=0, columnspan=4, sticky="nsew", pady=(12, 6))
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+
+        self.pack_listbox = tk.Listbox(list_frame, height=12)
+        self.pack_listbox.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.pack_listbox.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.pack_listbox.configure(yscrollcommand=scrollbar.set)
+
+        self.pack_listbox.bind("<Double-Button-1>", self._open_selected_pack)
+        self.pack_listbox.bind("<Return>", self._open_selected_pack)
+
+        self.pack_listbox.delete(0, tk.END)
+        for name in expected_pack_names():
+            self.pack_listbox.insert(tk.END, name)
+
+        self.tooltip = ListboxTooltip(self.pack_listbox, self._pack_description)
+
+        self.missing_label = ttk.Label(frame, text="", wraplength=580, foreground="#b00020")
+        self.missing_label.grid(row=3, column=0, columnspan=4, sticky="w")
+
+        hint = ttk.Label(frame, text=self._t("hint_double_click"))
+        hint.grid(row=4, column=0, columnspan=4, sticky="w")
+
+        self._refresh_pack_status(ask_create=True)
+
+    def _on_language_change(self, event=None) -> None:
+        selected = self.language_label_var.get()
+        for code, label in LANGUAGE_LABELS.items():
+            if label == selected:
+                self.language_var.set(code)
+                break
+        self.root.title(self._t("app_title"))
+        if self.current_view == "selector":
+            self._show_selector()
+        elif self.current_view == "entity":
+            self._show_entity_creator()
+
+    def _browse_root(self) -> None:
+        path = filedialog.askdirectory()
+        if not path:
+            return
+        self.root_path_var.set(path)
+        self._refresh_pack_status(ask_create=True)
+
+    def _refresh_pack_status(self, ask_create: bool = True) -> None:
+        root_path = normalize_root(self.root_path_var.get())
+        if not root_path.is_dir():
+            self.missing_label.config(text=self._t("invalid_root", path=str(root_path)))
+            return
+        missing = check_missing_packs(root_path)
+        if missing:
+            self.missing_label.config(text=self._t("missing_packs", names=", ".join(missing)))
+        else:
+            self.missing_label.config(text=self._t("all_packs_present"))
+        if ask_create and len(missing) == len(expected_pack_names()):
+            key = str(root_path)
+            if key not in self._asked_missing_for:
+                self._asked_missing_for.add(key)
+                if messagebox.askyesno(self._t("missing_all_title"), self._t("missing_all_message")):
+                    try:
+                        create_missing_packs(root_path, missing)
+                        self._refresh_pack_status(ask_create=False)
+                    except Exception as exc:
+                        messagebox.showerror(self._t("error_title"), self._t("create_failed", error=str(exc)))
+
+    def _pack_description(self, name: str) -> str:
+        desc = PACK_DESCS.get(name, {})
+        lang = self.language_var.get()
+        return desc.get(lang) or desc.get("en") or ""
+
+    def _open_selected_pack(self, event=None) -> None:
+        selection = self.pack_listbox.curselection()
+        if not selection:
+            return
+        name = self.pack_listbox.get(selection[0])
+        root_path = normalize_root(self.root_path_var.get())
+        pack_path = root_path / name
+        if not pack_path.is_dir():
+            messagebox.showwarning(self._t("warning_title"), self._t("missing_pack_warning", name=name))
+            return
+        if name == "BLF_CustomEntity":
+            self._show_entity_creator()
+        else:
+            messagebox.showinfo(self._t("info_title"), self._t("not_supported"))
+
+    def _show_entity_creator(self) -> None:
+        self._clear_frame()
+        self.current_view = "entity"
+        frame = ttk.Frame(self.root, padding=12)
+        frame.pack(fill="both", expand=True)
+        self.current_frame = frame
+        frame.columnconfigure(1, weight=1)
+
+        title = ttk.Label(frame, text=self._t("custom_entity_title"), font=("TkDefaultFont", 14, "bold"))
+        title.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        lang_label = ttk.Label(frame, text=self._t("language_label"))
+        lang_label.grid(row=0, column=2, sticky="e", padx=(12, 4))
+        lang_combo = ttk.Combobox(
+            frame,
+            textvariable=self.language_label_var,
+            values=list(LANGUAGE_LABELS.values()),
+            state="readonly",
+            width=10,
         )
-        name_entry.grid(row=1, column=1, sticky="ew", padx=6, pady=4)
-        ttk.Label(
-            form,
-            text=f"영문 소문자/숫자/언더바만, 공백/대문자 불가, 최대 {MAX_NAME_LEN}자",
-            foreground="#666666",
-        ).grid(row=1, column=2, sticky="w", padx=6)
+        lang_combo.grid(row=0, column=3, sticky="e")
+        lang_combo.bind("<<ComboboxSelected>>", self._on_language_change)
 
+        row = 1
+        ttk.Label(frame, text=self._t("field_entity_name")).grid(row=row, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.entity_name_var).grid(
+            row=row, column=1, columnspan=3, sticky="ew", padx=(8, 0)
+        )
+
+        row += 1
+        ttk.Label(frame, text=self._t("field_namespace")).grid(row=row, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.namespace_var).grid(row=row, column=1, sticky="ew", padx=(8, 0))
+        ttk.Label(frame, text=self._t("namespace_hint")).grid(row=row, column=2, columnspan=2, sticky="w", padx=(8, 0))
+
+        row += 1
+        self._add_file_row(frame, row, self._t("field_model"), self.model_path_var, [("JSON", "*.json"), ("All files", "*.*")])
+        row += 1
+        self._add_file_row(frame, row, self._t("field_texture"), self.texture_path_var, [("Images", "*.png;*.tga"), ("All files", "*.*")])
+        row += 1
         self._add_file_row(
-            form,
-            row=2,
-            label="애니메이션 컨트롤러",
-            var=self.anim_controller_var,
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            frame,
+            row,
+            self._t("field_anim_controller"),
+            self.anim_controller_path_var,
+            [("JSON", "*.json"), ("All files", "*.*")],
         )
-        self._add_file_row(
-            form,
-            row=3,
-            label="애니메이션",
-            var=self.animation_var,
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-        )
-        self._add_file_row(
-            form,
-            row=4,
-            label="모델링 *",
-            var=self.model_var,
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-        )
-        self._add_file_row(
-            form,
-            row=5,
-            label="텍스처 *",
-            var=self.texture_var,
-            filetypes=[("PNG files", "*.png"), ("All files", "*.*")],
-        )
-        self._add_file_row(
-            form,
-            row=6,
-            label="아이콘 텍스처",
-            var=self.icon_var,
-            filetypes=[("PNG files", "*.png"), ("All files", "*.*")],
+        row += 1
+        self._add_file_row(frame, row, self._t("field_animation"), self.animation_path_var, [("JSON", "*.json"), ("All files", "*.*")])
+        row += 1
+        self._add_file_row(frame, row, self._t("field_icon"), self.icon_path_var, [("Images", "*.png"), ("All files", "*.*")])
+
+        row += 1
+        ttk.Label(frame, text=self._t("required_hint")).grid(row=row, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        row += 1
+        ttk.Checkbutton(frame, text=self._t("behavior_pack_checkbox"), variable=self.behavior_pack_var).grid(
+            row=row, column=0, columnspan=4, sticky="w", pady=(6, 0)
         )
 
-        action_frame = ttk.Frame(wrapper)
-        action_frame.pack(fill="x", pady=(10, 6))
-        ttk.Button(action_frame, text="생성", command=self._create_entity).pack(
-            side="right"
+        row += 1
+        button_frame = ttk.Frame(frame)
+        button_frame.grid(row=row, column=0, columnspan=4, sticky="e", pady=(12, 0))
+        ttk.Button(button_frame, text=self._t("back_button"), command=self._show_selector).pack(side="left", padx=(0, 8))
+        ttk.Button(button_frame, text=self._t("create_button"), command=self._create_entity).pack(side="left")
+
+    def _add_file_row(self, parent, row: int, label_text: str, var: tk.StringVar, filetypes) -> None:
+        ttk.Label(parent, text=label_text).grid(row=row, column=0, sticky="w")
+        ttk.Entry(parent, textvariable=var).grid(row=row, column=1, columnspan=2, sticky="ew", padx=(8, 0))
+        ttk.Button(parent, text=self._t("select_button"), command=lambda: self._choose_file(var, filetypes)).grid(
+            row=row, column=3, sticky="e"
         )
 
-        log_frame = ttk.Frame(wrapper)
-        log_frame.pack(fill="both", expand=True, pady=(8, 0))
-
-        ttk.Label(log_frame, text="로그").pack(anchor="w")
-        self.entity_log_text = tk.Text(log_frame, height=10, wrap="word")
-        self.entity_log_text.pack(side="left", fill="both", expand=True)
-        log_scroll = ttk.Scrollbar(
-            log_frame, orient="vertical", command=self.entity_log_text.yview
-        )
-        log_scroll.pack(side="right", fill="y")
-        self.entity_log_text.config(yscrollcommand=log_scroll.set)
-        self.entity_log_text.configure(state="disabled")
-
-        return wrapper
-
-    def _add_file_row(
-        self,
-        parent: ttk.Frame,
-        row: int,
-        label: str,
-        var: tk.StringVar,
-        filetypes: list[tuple[str, str]],
-    ) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=4)
-        entry = ttk.Entry(parent, textvariable=var)
-        entry.grid(row=row, column=1, sticky="ew", padx=6, pady=4)
-        ttk.Button(
-            parent,
-            text="찾기",
-            command=lambda: self._choose_file(var, filetypes),
-        ).grid(row=row, column=2, sticky="w", padx=6)
-
-    def _choose_file(self, var: tk.StringVar, filetypes: list[tuple[str, str]]) -> None:
-        initial_dir = self._pack_path("BLF_CustomEntity")
-        path = filedialog.askopenfilename(
-            initialdir=str(initial_dir) if initial_dir else None,
-            filetypes=filetypes,
-        )
+    def _choose_file(self, var: tk.StringVar, filetypes) -> None:
+        path = filedialog.askopenfilename(filetypes=filetypes)
         if path:
             var.set(path)
 
-    def _validate_entity_name(self, value: str) -> bool:
-        if len(value) > MAX_NAME_LEN:
-            return False
-        if value == "":
-            return True
-        return re.fullmatch(r"[a-z0-9_]+", value) is not None
-
-    def _validate_namespace(self, value: str) -> bool:
-        if value == "":
-            return True
-        if len(value) > MAX_NAME_LEN:
-            return False
-        return re.fullmatch(r"[a-z]+", value) is not None
-
-    def _normalize_namespace(self) -> str:
-        if self.namespace_var is None:
-            return "blf"
-        value = self.namespace_var.get().strip()
-        return value if value else "blf"
-
-    def _validate_entity_input(self) -> list[str]:
-        errors = []
-        name = (self.entity_name_var.get() if self.entity_name_var else "").strip()
-        if not name:
-            errors.append("엔티티 이름은 필수입니다.")
-        elif len(name) > MAX_NAME_LEN:
-            errors.append(f"엔티티 이름은 최대 {MAX_NAME_LEN}자까지 가능합니다.")
-        elif re.fullmatch(r"[a-z0-9_]+", name) is None:
-            errors.append("엔티티 이름은 영문 소문자/숫자/언더바만 사용할 수 있습니다.")
-
-        namespace = (self.namespace_var.get() if self.namespace_var else "").strip()
-        if namespace and re.fullmatch(r"[a-z]+", namespace) is None:
-            errors.append("prefix는 영문 소문자만 사용할 수 있습니다.")
-        elif namespace and len(namespace) > MAX_NAME_LEN:
-            errors.append(f"prefix는 최대 {MAX_NAME_LEN}자까지 가능합니다.")
-
-        model_path = (self.model_var.get() if self.model_var else "").strip()
-        if not model_path:
-            errors.append("모델링 파일은 필수입니다.")
-        elif not Path(model_path).is_file():
-            errors.append("모델링 파일 경로가 올바르지 않습니다.")
-
-        texture_path = (self.texture_var.get() if self.texture_var else "").strip()
-        if not texture_path:
-            errors.append("텍스처 파일은 필수입니다.")
-        elif not Path(texture_path).is_file():
-            errors.append("텍스처 파일 경로가 올바르지 않습니다.")
-
-        anim_controller = (
-            self.anim_controller_var.get() if self.anim_controller_var else ""
-        ).strip()
-        if anim_controller and not Path(anim_controller).is_file():
-            errors.append("애니메이션 컨트롤러 파일 경로가 올바르지 않습니다.")
-
-        animation = (self.animation_var.get() if self.animation_var else "").strip()
-        if animation and not Path(animation).is_file():
-            errors.append("애니메이션 파일 경로가 올바르지 않습니다.")
-
-        icon = (self.icon_var.get() if self.icon_var else "").strip()
-        if icon and not Path(icon).is_file():
-            errors.append("아이콘 텍스처 파일 경로가 올바르지 않습니다.")
-
-        return errors
-
     def _create_entity(self) -> None:
-        errors = self._validate_entity_input()
-        if errors:
-            messagebox.showerror("입력 오류", "\n".join(errors))
-            return
-
         name = self.entity_name_var.get().strip()
-        namespace = self._normalize_namespace()
-        if self._entity_name_in_use(name):
-            messagebox.showerror("이름 중복", "이미 쓰고 있는 이름입니다.")
+        namespace = self.namespace_var.get().strip() or DEFAULT_NAMESPACE
+
+        missing_fields = []
+        if not name:
+            missing_fields.append(self._t("field_entity_name"))
+        if not self.model_path_var.get().strip():
+            missing_fields.append(self._t("field_model"))
+        if not self.texture_path_var.get().strip():
+            missing_fields.append(self._t("field_texture"))
+        if missing_fields:
+            messagebox.showwarning(
+                self._t("warning_title"),
+                self._t("missing_required", fields=", ".join(missing_fields)),
+            )
             return
 
-        pack_path = self._pack_path("BLF_CustomEntity")
-        if pack_path is None:
-            messagebox.showerror("경로 오류", "BLF_CustomEntity 경로를 찾을 수 없습니다.")
+        if len(name) > 20 or not re.fullmatch(r"[a-z0-9_]+", name):
+            messagebox.showwarning(self._t("warning_title"), self._t("invalid_name"))
+            return
+
+        if not re.fullmatch(r"[a-z]+", namespace):
+            messagebox.showwarning(self._t("warning_title"), self._t("invalid_prefix"))
+            return
+
+        model_source = Path(self.model_path_var.get().strip())
+        if not model_source.is_file():
+            messagebox.showerror(self._t("error_title"), self._t("file_not_found", path=str(model_source)))
+            return
+
+        texture_source = Path(self.texture_path_var.get().strip())
+        if not texture_source.is_file():
+            messagebox.showerror(self._t("error_title"), self._t("file_not_found", path=str(texture_source)))
+            return
+
+        animation_source = Path(self.animation_path_var.get().strip()) if self.animation_path_var.get().strip() else None
+        if animation_source and not animation_source.is_file():
+            messagebox.showerror(self._t("error_title"), self._t("file_not_found", path=str(animation_source)))
+            return
+
+        controller_source = (
+            Path(self.anim_controller_path_var.get().strip())
+            if self.anim_controller_path_var.get().strip()
+            else None
+        )
+        if controller_source and not controller_source.is_file():
+            messagebox.showerror(self._t("error_title"), self._t("file_not_found", path=str(controller_source)))
+            return
+
+        icon_source = Path(self.icon_path_var.get().strip()) if self.icon_path_var.get().strip() else None
+        if icon_source and not icon_source.is_file():
+            messagebox.showerror(self._t("error_title"), self._t("file_not_found", path=str(icon_source)))
+            return
+
+        root_path = normalize_root(self.root_path_var.get())
+        if not root_path.is_dir():
+            messagebox.showerror(self._t("error_title"), self._t("invalid_root", path=str(root_path)))
+            return
+
+        pack_root = root_path / "BLF_CustomEntity"
+        if not pack_root.is_dir():
+            messagebox.showerror(self._t("error_title"), self._t("missing_pack_warning", name="BLF_CustomEntity"))
+            return
+
+        entity_path = pack_root / "entity" / f"{name}.entity.json"
+        if entity_path.exists():
+            messagebox.showwarning(self._t("warning_title"), self._t("duplicate_name"))
             return
 
         try:
-            self._ensure_entity_dirs(pack_path)
-
-            entity_path = pack_path / "entity" / f"{name}.entity.json"
-            model_target = pack_path / "models" / "entity" / f"{name}.geo.json"
-            texture_target = pack_path / "textures" / "entity" / f"{name}.png"
-            anim_target = pack_path / "animations" / f"{name}.animation.json"
-            controller_target = (
-                pack_path / "animation_controllers" / f"{name}.ac.json"
+            self._generate_entity_files(
+                pack_root,
+                name,
+                namespace,
+                model_source,
+                texture_source,
+                animation_source,
+                controller_source,
+                icon_source,
             )
-            icon_target = pack_path / "textures" / "items" / f"{name}.icon.png"
-
-            defaults = self._default_entity_templates()
-
-            model_path = Path(self.model_var.get().strip())
-            texture_path = Path(self.texture_var.get().strip())
-            anim_controller_path = self.anim_controller_var.get().strip()
-            animation_path = self.animation_var.get().strip()
-            icon_path = self.icon_var.get().strip()
-
-            self._copy_json_with_replacements(model_path, model_target, name)
-            shutil.copy2(texture_path, texture_target)
-
-            if anim_controller_path:
-                self._copy_json_with_replacements(
-                    Path(anim_controller_path), controller_target, name
-                )
-            else:
-                self._copy_json_with_replacements(
-                    Path(defaults["anim_controller"]), controller_target, name
-                )
-
-            if animation_path:
-                self._copy_json_with_replacements(
-                    Path(animation_path), anim_target, name
-                )
-            else:
-                self._copy_json_with_replacements(
-                    Path(defaults["animation"]), anim_target, name
-                )
-
-            if icon_path:
-                shutil.copy2(Path(icon_path), icon_target)
-            else:
-                shutil.copy2(Path(defaults["icon"]), icon_target)
-
-            self._create_entity_json(
-                Path(defaults["entity"]), entity_path, name, namespace
-            )
-            self._update_item_texture(pack_path, name)
-
-            self._log_entity(f"생성 완료: {entity_path}")
-            messagebox.showinfo("완료", "엔티티 파일이 생성되었습니다.")
-            self._show_selector()
+            if self.behavior_pack_var.get():
+                behavior_pack = self._ensure_behavior_pack()
+                self._create_behavior_entity(behavior_pack, name, namespace)
+                self._create_behavior_spawn_item(behavior_pack, name, namespace)
+                self._ensure_armor_samples(behavior_pack, namespace)
         except Exception as exc:
-            messagebox.showerror("생성 실패", f"생성 중 오류가 발생했습니다.\n{exc}")
+            messagebox.showerror(self._t("error_title"), str(exc))
+            return
 
-    def _default_entity_templates(self) -> dict[str, str]:
-        pack_path = self._pack_path("BLF_CustomEntity")
-        if pack_path is None:
-            return {
-                "entity": "entity/default_entity.entity.json",
-                "anim_controller": "animation_controllers/default_entity.ac.json",
-                "animation": "animations/default_entity.animation.json",
-                "icon": "textures/items/default_entity.icon.png",
-            }
-        return {
-            "entity": str(pack_path / "entity" / "default_entity.entity.json"),
-            "anim_controller": str(
-                pack_path / "animation_controllers" / "default_entity.ac.json"
-            ),
-            "animation": str(pack_path / "animations" / "default_entity.animation.json"),
-            "icon": str(pack_path / "textures" / "items" / "default_entity.icon.png"),
+        messagebox.showinfo(self._t("info_title"), self._t("create_success", name=name))
+        self._show_selector()
+
+    def _generate_entity_files(
+        self,
+        pack_root: Path,
+        name: str,
+        namespace: str,
+        model_source: Path,
+        texture_source: Path,
+        animation_source: Optional[Path],
+        controller_source: Optional[Path],
+        icon_source: Optional[Path],
+    ) -> None:
+        animations_dir = pack_root / "animations"
+        controllers_dir = pack_root / "animation_controllers"
+        entity_dir = pack_root / "entity"
+        models_dir = pack_root / "models" / "entity"
+        textures_entity_dir = pack_root / "textures" / "entity"
+        textures_items_dir = pack_root / "textures" / "items"
+
+        for path in [animations_dir, controllers_dir, entity_dir, models_dir, textures_entity_dir, textures_items_dir]:
+            path.mkdir(parents=True, exist_ok=True)
+
+        template_animation = animations_dir / "default_entity.animation.json"
+        template_controller = controllers_dir / "default_entity.ac.json"
+        template_entity = entity_dir / "default_entity.entity.json"
+        template_icon = textures_items_dir / "default_entity.icon.png"
+
+        animation_src = animation_source or template_animation
+        controller_src = controller_source or template_controller
+        if not animation_src.is_file():
+            raise FileNotFoundError(self._t("file_not_found", path=str(animation_src)))
+        if not controller_src.is_file():
+            raise FileNotFoundError(self._t("file_not_found", path=str(controller_src)))
+        if not template_entity.is_file():
+            raise FileNotFoundError(self._t("file_not_found", path=str(template_entity)))
+
+        anim_dest = animations_dir / f"{name}.animation.json"
+        controller_dest = controllers_dir / f"{name}.ac.json"
+        model_dest = models_dir / f"{name}.geo.json"
+        texture_dest = textures_entity_dir / f"{name}{texture_source.suffix}"
+        icon_dest = textures_items_dir / f"{name}.icon.png"
+
+        self._copy_text_with_replace(animation_src, anim_dest, {"default_entity": name})
+        self._copy_text_with_replace(controller_src, controller_dest, {"default_entity": name})
+
+        model_text = model_source.read_text(encoding="utf-8")
+        if "default_entity" in model_text:
+            model_text = model_text.replace("default_entity", name)
+        model_dest.write_text(model_text, encoding="utf-8")
+        geo_identifier = self._get_geometry_identifier(model_dest) or f"geometry.{name}"
+
+        shutil.copy2(texture_source, texture_dest)
+
+        if icon_source and icon_source.is_file():
+            shutil.copy2(icon_source, icon_dest)
+        elif template_icon.is_file():
+            shutil.copy2(template_icon, icon_dest)
+        else:
+            raise FileNotFoundError(self._t("file_not_found", path=str(template_icon)))
+
+        entity_data = self._load_json(template_entity)
+        client_entity = entity_data.setdefault("minecraft:client_entity", {})
+        if not isinstance(client_entity, dict):
+            client_entity = {}
+            entity_data["minecraft:client_entity"] = client_entity
+        description = client_entity.setdefault("description", {})
+        if not isinstance(description, dict):
+            description = {}
+            client_entity["description"] = description
+
+        description["identifier"] = f"{namespace}:{name}"
+        description["textures"] = {"default": f"textures/entity/{name}"}
+        description["geometry"] = {"default": geo_identifier}
+        description["animations"] = {
+            "setup": f"animation.{name}.setup",
+            "normal": f"animation.{name}.normal",
+            "default": f"animation.{name}.default",
+            "skill1": f"animation.{name}.skill1",
+            "skill2": f"animation.{name}.skill2",
+            "skill3": f"animation.{name}.skill3",
+            "skill4": f"animation.{name}.skill4",
+            "skill5": f"animation.{name}.skill5",
         }
+        description["scripts"] = {
+            "animate": ["setup", "normal", f"controller.animation.{name}"]
+        }
+        description["spawn_egg"] = {"texture": name}
 
-    def _ensure_entity_dirs(self, pack_path: Path) -> None:
-        for rel in [
-            "entity",
-            "animations",
-            "animation_controllers",
-            "models/entity",
-            "textures/entity",
-            "textures/items",
-            "textures",
-        ]:
-            (pack_path / rel).mkdir(parents=True, exist_ok=True)
+        self._write_json(entity_dir / f"{name}.entity.json", entity_data)
+        self._ensure_item_texture_entry(pack_root, name)
 
-    def _entity_name_in_use(self, name: str) -> bool:
-        pack_path = self._pack_path("BLF_CustomEntity")
-        if pack_path is None:
-            return False
-        if (pack_path / "entity" / f"{name}.entity.json").is_file():
-            return True
-        if (pack_path / "models" / "entity" / f"{name}.geo.json").is_file():
-            return True
-        if (pack_path / "textures" / "entity" / f"{name}.png").is_file():
-            return True
-        if (pack_path / "textures" / "items" / f"{name}.icon.png").is_file():
-            return True
-        item_texture = pack_path / "textures" / "item_texture.json"
-        data = self._load_json(item_texture)
-        if isinstance(data, dict):
-            texture_data = data.get("texture_data")
-            if isinstance(texture_data, dict) and name in texture_data:
-                return True
-        return False
+    def _copy_text_with_replace(self, source: Path, destination: Path, replacements: Dict[str, str]) -> None:
+        text = source.read_text(encoding="utf-8")
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        destination.write_text(text, encoding="utf-8")
 
-    def _load_json(self, path: Path):
+    def _load_json(self, path: Path) -> dict:
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return None
+            return {}
 
-    def _write_json(self, path: Path, data) -> None:
-        path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+    def _write_json(self, path: Path, data: dict) -> None:
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-    def _replace_in_json(self, obj, old: str, new: str):
-        if isinstance(obj, dict):
-            updated = {}
-            for key, value in obj.items():
-                new_key = key.replace(old, new) if isinstance(key, str) else key
-                updated[new_key] = self._replace_in_json(value, old, new)
-            return updated
-        if isinstance(obj, list):
-            return [self._replace_in_json(item, old, new) for item in obj]
-        if isinstance(obj, str):
-            return obj.replace(old, new)
-        return obj
-
-    def _copy_json_with_replacements(self, src: Path, dest: Path, name: str) -> None:
-        data = self._load_json(src)
-        if data is None:
-            shutil.copy2(src, dest)
-            return
-        replaced = self._replace_in_json(data, "default_entity", name)
-        self._write_json(dest, replaced)
-
-    def _create_entity_json(
-        self, template_path: Path, dest: Path, name: str, namespace: str
-    ) -> None:
-        data = self._load_json(template_path)
-        if data is None:
-            raise ValueError("기본 엔티티 템플릿을 읽을 수 없습니다.")
-        replaced = self._replace_in_json(data, "default_entity", name)
-
-        entity = replaced.get("minecraft:client_entity")
-        if isinstance(entity, dict):
-            desc = entity.get("description")
+    def _get_geometry_identifier(self, path: Path) -> Optional[str]:
+        data = self._load_json(path)
+        geos = data.get("minecraft:geometry")
+        if isinstance(geos, list) and geos:
+            desc = geos[0].get("description")
             if isinstance(desc, dict):
-                desc["identifier"] = f"{namespace}:{name}"
-                spawn = desc.get("spawn_egg")
-                if not isinstance(spawn, dict):
-                    spawn = {}
-                    desc["spawn_egg"] = spawn
-                spawn["texture"] = name
+                ident = desc.get("identifier")
+                if isinstance(ident, str):
+                    return ident
+        return None
 
-        self._write_json(dest, replaced)
-
-    def _update_item_texture(self, pack_path: Path, name: str) -> None:
-        item_path = pack_path / "textures" / "item_texture.json"
-        data = self._load_json(item_path)
+    def _ensure_item_texture_entry(self, pack_root: Path, name: str) -> None:
+        item_texture_path = pack_root / "textures" / "item_texture.json"
+        data = self._load_json(item_texture_path)
         if not isinstance(data, dict):
-            data = {
-                "resource_pack_name": "vanilla",
-                "texture_name": "atlas.items",
-                "texture_data": {},
-            }
-
+            data = {}
         texture_data = data.get("texture_data")
         if not isinstance(texture_data, dict):
             texture_data = {}
             data["texture_data"] = texture_data
-
         texture_data[name] = {"textures": f"textures/items/{name}.icon"}
-        self._write_json(item_path, data)
+        data.setdefault("texture_name", "atlas.items")
+        data.setdefault("resource_pack_name", "vanilla")
+        self._write_json(item_texture_path, data)
 
-    def _pack_path(self, name: str) -> Path | None:
+    def _ensure_behavior_pack(self) -> Path:
         root_path = normalize_root(self.root_path_var.get())
-        if not root_path.is_dir():
-            return None
-        path = root_path / name
-        if path.is_dir():
-            return path
+        behavior_root = root_path.parent / "development_behavior_packs"
+        behavior_root.mkdir(parents=True, exist_ok=True)
+        pack_dir = behavior_root / BEHAVIOR_PACK_NAME
+        pack_dir.mkdir(parents=True, exist_ok=True)
+        (pack_dir / "entities").mkdir(parents=True, exist_ok=True)
+        (pack_dir / "items").mkdir(parents=True, exist_ok=True)
+
+        manifest_path = pack_dir / "manifest.json"
+        if not manifest_path.is_file():
+            manifest = {
+                "format_version": 2,
+                "header": {
+                    "name": BEHAVIOR_PACK_NAME,
+                    "description": f"{BEHAVIOR_PACK_NAME} (generated by goldstar)",
+                    "uuid": str(uuid.uuid4()),
+                    "version": [1, 0, 0],
+                    "min_engine_version": [1, 20, 0],
+                },
+                "modules": [
+                    {
+                        "type": "data",
+                        "uuid": str(uuid.uuid4()),
+                        "version": [1, 0, 0],
+                    }
+                ],
+            }
+            self._write_json(manifest_path, manifest)
+
+        icon_path = pack_dir / "pack_icon.png"
+        if not icon_path.is_file():
+            icon_source = self._find_pack_icon_source()
+            if icon_source:
+                shutil.copy2(icon_source, icon_path)
+
+        return pack_dir
+
+    def _find_pack_icon_source(self) -> Optional[Path]:
+        root_path = normalize_root(self.root_path_var.get())
+        for name in expected_pack_names():
+            icon_path = root_path / name / "pack_icon.png"
+            if icon_path.is_file():
+                return icon_path
+        if self.logo_path.is_file():
+            return self.logo_path
         return None
 
-    def _browse(self) -> None:
-        path = filedialog.askdirectory()
-        if path:
-            self.root_path_var.set(path)
+    def _build_behavior_entity(self, namespace: str, name: str) -> dict:
+        return {
+            "format_version": "1.20.0",
+            "minecraft:entity": {
+                "description": {
+                    "identifier": f"{namespace}:{name}",
+                    "is_spawnable": True,
+                    "is_summonable": True,
+                    "is_experimental": False,
+                },
+                "components": {
+                    "minecraft:health": {"value": 1, "max": 1},
+                    "minecraft:movement": {"value": 0},
+                    "minecraft:collision_box": {"width": 0.6, "height": 1.8},
+                    "minecraft:pushable": {
+                        "is_pushable": False,
+                        "is_pushable_by_piston": False,
+                    },
+                },
+            },
+        }
 
-    def _scan_required_packs(self) -> None:
-        root_path = normalize_root(self.root_path_var.get())
-        if not root_path.is_dir():
-            messagebox.showerror("경로 오류", "리소스팩 경로가 존재하지 않습니다.")
-            self._set_ready_state(False)
-            return
+    def _build_behavior_spawn_item(self, namespace: str, name: str) -> dict:
+        return {
+            "format_version": "1.20.0",
+            "minecraft:item": {
+                "description": {"identifier": f"{namespace}:{name}_spawn"},
+                "components": {
+                    "minecraft:display_name": {"value": f"{name} spawn"},
+                    "minecraft:icon": {"texture": name},
+                    "minecraft:entity_placer": {"entity": f"{namespace}:{name}"},
+                },
+            },
+        }
 
-        missing = check_missing_packs(root_path)
-        expected = expected_pack_names()
+    def _build_behavior_armor_item(self, namespace: str, identifier: str, slot: str, icon: str) -> dict:
+        return {
+            "format_version": "1.20.0",
+            "minecraft:item": {
+                "description": {"identifier": f"{namespace}:{identifier}"},
+                "components": {
+                    "minecraft:display_name": {"value": identifier},
+                    "minecraft:icon": {"texture": icon},
+                    "minecraft:wearable": {"slot": slot},
+                    "minecraft:armor": {"protection": 1},
+                    "minecraft:durability": {"max_durability": 1},
+                },
+            },
+        }
 
-        if missing:
-            missing_list = ", ".join(missing)
-            self._log(f"누락된 리소스팩: {missing_list}")
-            if len(missing) == len(expected):
-                if messagebox.askyesno(
-                    "리소스팩 없음",
-                    "BLF_ 리소스팩이 하나도 없습니다.\n"
-                    "메타데이터 기반으로 최소 리소스팩을 생성할까요?",
-                ):
-                    created = create_missing_packs(root_path, missing)
-                    created_names = ", ".join([p.name for p in created])
-                    self._log(f"생성 완료: {created_names}")
-                    missing = check_missing_packs(root_path)
-            else:
-                messagebox.showwarning("리소스팩 누락", f"누락된 팩: {missing_list}")
+    def _create_behavior_entity(self, pack_dir: Path, name: str, namespace: str) -> None:
+        entity_path = pack_dir / "entities" / f"{name}.json"
+        if entity_path.exists():
+            raise FileExistsError(self._t("duplicate_name"))
+        self._write_json(entity_path, self._build_behavior_entity(namespace, name))
 
-        is_ready = not missing
-        self._set_ready_state(is_ready)
+    def _create_behavior_spawn_item(self, pack_dir: Path, name: str, namespace: str) -> None:
+        item_path = pack_dir / "items" / f"{name}_spawn.json"
+        if item_path.exists():
+            raise FileExistsError(self._t("duplicate_name"))
+        self._write_json(item_path, self._build_behavior_spawn_item(namespace, name))
 
-        if is_ready:
-            self._log("BLF_ 팩 11개 확인 완료.")
-            for pack in scan_packs(root_path):
-                self._log(pack.summary_line())
-        else:
-            self._log("모든 BLF_ 팩이 준비되어야 선택할 수 있습니다.")
-
-    def _set_ready_state(self, ready: bool) -> None:
-        if self.pack_list is not None:
-            state = "normal" if ready else "disabled"
-            self.pack_list.configure(state=state)
-        if self.select_button is not None:
-            self.select_button.configure(state=("normal" if ready else "disabled"))
-        self.status_var.set("모든 팩이 준비되었습니다." if ready else "팩이 누락되었습니다.")
-
-    def _populate_pack_list(self) -> None:
-        if self.pack_list is None:
-            return
-        self.pack_list.delete(0, tk.END)
-        for name, _desc in EXPECTED_PACKS:
-            self.pack_list.insert(tk.END, name)
-
-    def _select_pack(self) -> None:
-        if self.pack_list is None:
-            return
-        selection = self.pack_list.curselection()
-        if not selection:
-            messagebox.showinfo("선택 필요", "리소스팩을 하나 선택하세요.")
-            return
-        name = self.pack_list.get(selection[0])
-        self._open_pack(name)
-
-    def _on_pack_double_click(self, _event: tk.Event) -> None:
-        if self.pack_list is None:
-            return
-        selection = self.pack_list.curselection()
-        if not selection:
-            return
-        name = self.pack_list.get(selection[0])
-        self._open_pack(name)
-
-    def _open_pack(self, name: str) -> None:
-        if name != "BLF_CustomEntity":
-            messagebox.showinfo("준비중", "현재는 CustomEntity만 지원합니다.")
-            self._log(f"선택됨: {name}")
-            return
-        self._switch_view(self._build_entity_creator())
-
-    def _log(self, message: str) -> None:
-        if self.log_text is None:
-            return
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", message + "\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
-
-    def _log_entity(self, message: str) -> None:
-        if self.entity_log_text is None:
-            return
-        self.entity_log_text.configure(state="normal")
-        self.entity_log_text.insert("end", message + "\n")
-        self.entity_log_text.see("end")
-        self.entity_log_text.configure(state="disabled")
-
-    def run(self) -> None:
-        self.root.mainloop()
+    def _ensure_armor_samples(self, pack_dir: Path, namespace: str) -> None:
+        items_dir = pack_dir / "items"
+        for identifier, slot, icon in ARMOR_SAMPLES:
+            item_path = items_dir / f"{identifier}.json"
+            if item_path.is_file():
+                continue
+            item_data = self._build_behavior_armor_item(namespace, identifier, slot, icon)
+            self._write_json(item_path, item_data)
 
 
 def main() -> None:
-    app = MainWindow()
-    app.run()
+    root = tk.Tk()
+    app = GoldStarApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

@@ -14,7 +14,15 @@ PACK_ICON_PNG_BASE64 = (
 
 
 def expected_pack_names() -> List[str]:
-    return [name for name, _desc in EXPECTED_PACKS]
+    names = []
+    for pack in EXPECTED_PACKS:
+        if isinstance(pack, dict):
+            name = pack.get("name")
+            if name:
+                names.append(name)
+        else:
+            names.append(pack[0])
+    return names
 
 
 def check_missing_packs(root_path: Path) -> List[str]:
